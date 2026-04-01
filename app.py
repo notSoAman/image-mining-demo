@@ -1,7 +1,11 @@
 import streamlit as st
 import os
+import io
+import uuid
+import hashlib
 import pandas as pd
 import numpy as np
+from PIL import Image
 from engine import (
     extract_features, 
     save_to_warehouse, 
@@ -10,6 +14,11 @@ from engine import (
     visualize_clusters,
     calculate_duplicates
 )
+
+try:
+    from streamlit_paste_button import paste_image_button
+except Exception:
+    paste_image_button = None
 
 # Page Config
 st.set_page_config(page_title="Image Data Warehouse", layout="wide")
@@ -22,17 +31,73 @@ st.markdown("""
 
 # Sidebar
 st.sidebar.header("1. Data Ingestion")
-uploaded_files = st.sidebar.file_uploader("Upload Images", accept_multiple_files=True, type=['jpg', 'png', 'jpeg'])
+st.sidebar.caption("Use any input method: upload, drag and drop, or paste from clipboard.")
 
-if uploaded_files:
+if "pasted_images" not in st.session_state:
+    st.session_state.pasted_images = []
+if "pasted_image_hashes" not in st.session_state:
+    st.session_state.pasted_image_hashes = set()
+
+uploaded_files = st.sidebar.file_uploader(
+    "Upload or drag and drop images",
+    accept_multiple_files=True,
+    type=['jpg', 'png', 'jpeg', 'webp']
+)
+
+if paste_image_button:
+    with st.sidebar:
+        st.markdown("Paste image from clipboard")
+        paste_result = paste_image_button("Paste image", key="paste_image")
+    if paste_result is not None and getattr(paste_result, "image_data", None) is not None:
+        pasted = paste_result.image_data
+        if isinstance(pasted, Image.Image):
+            pil_image = pasted.convert("RGB")
+        else:
+            pil_image = Image.fromarray(np.asarray(pasted)).convert("RGB")
+
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG")
+        image_bytes = buffer.getvalue()
+        image_hash = hashlib.md5(image_bytes).hexdigest()
+
+        if image_hash not in st.session_state.pasted_image_hashes:
+            st.session_state.pasted_images.append(image_bytes)
+            st.session_state.pasted_image_hashes.add(image_hash)
+            st.sidebar.success(f"Clipboard image added. Total pasted: {len(st.session_state.pasted_images)}")
+
+    if st.session_state.pasted_images:
+        st.sidebar.caption(f"Clipboard images queued: {len(st.session_state.pasted_images)}")
+        if st.sidebar.button("Clear pasted images", key="clear_pasted_images"):
+            st.session_state.pasted_images = []
+            st.session_state.pasted_image_hashes = set()
+            st.rerun()
+else:
+    st.sidebar.info("Install streamlit-paste-button to enable clipboard paste support.")
+
+has_inputs = bool(uploaded_files) or len(st.session_state.pasted_images) > 0
+
+if has_inputs:
     # Save uploads temporarily
     save_dir = "temp_uploads"
     os.makedirs(save_dir, exist_ok=True)
     paths = []
-    for file in uploaded_files:
-        path = os.path.join(save_dir, file.name)
+
+    # Save uploaded/drag-dropped images
+    for file in uploaded_files or []:
+        original_name = os.path.basename(file.name)
+        name_root, ext = os.path.splitext(original_name)
+        unique_name = f"{name_root}_{uuid.uuid4().hex[:8]}{ext}"
+        path = os.path.join(save_dir, unique_name)
         with open(path, "wb") as f:
             f.write(file.getbuffer())
+        paths.append(path)
+
+    # Save pasted clipboard images
+    for idx, image_bytes in enumerate(st.session_state.pasted_images, start=1):
+        unique_name = f"clipboard_{idx}_{uuid.uuid4().hex[:8]}.png"
+        path = os.path.join(save_dir, unique_name)
+        with open(path, "wb") as f:
+            f.write(image_bytes)
         paths.append(path)
     
     st.success(f"{len(paths)} images ingested.")
@@ -136,11 +201,22 @@ if uploaded_files:
                     with st.container():
                         st.markdown(f"### {cluster_names[i]}")
                         st.info(f"**Detected Concepts:** {', '.join(cluster_detections[i])}")
-                        st.write(f"Contains **{sum(labels == i)}** images.")
+                        cluster_image_paths = [
+                            valid_paths[idx] for idx, cluster_id in enumerate(labels) if cluster_id == i
+                        ]
+                        st.write(f"Contains **{len(cluster_image_paths)}** images.")
+
+                        if cluster_image_paths:
+                            st.caption("Thumbnail preview")
+                            columns_per_row = 5
+                            cols = st.columns(columns_per_row)
+                            for idx, image_path in enumerate(cluster_image_paths):
+                                col = cols[idx % columns_per_row]
+                                with col:
+                                    st.image(image_path, caption=os.path.basename(image_path), use_container_width=True)
                         st.divider()
                 
-                st.balloons()
             else:
                 st.error("No valid images processed.")
 else:
-    st.info("Please upload images from the sidebar to begin the pipeline.")
+    st.info("Please upload, drag and drop, or paste images from the sidebar to begin the pipeline.")

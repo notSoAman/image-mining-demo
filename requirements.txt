@@ -1,4 +1,5 @@
 streamlit
+streamlit-paste-button
 pandas
 numpy
 scikit-learn
